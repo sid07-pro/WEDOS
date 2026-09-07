@@ -1,0 +1,302 @@
+// Wedding OS — Prisma Schema
+// Phase 2: Database Foundation
+//
+// Referential action decisions:
+//   - Wedding → { Guest, Event, Expense, Task, Booking }  : onDelete: Cascade
+//     Rationale: these records are owned by the wedding and are meaningless without it.
+//   - User → Wedding                                       : onDelete: Restrict
+//     Rationale: prevent accidental customer deletion while a wedding exists.
+//   - User → VendorProfile                                 : onDelete: Restrict
+//     Rationale: prevent accidental vendor deletion while a profile exists.
+//   - VendorProfile → Booking                              : onDelete: Restrict
+//     Rationale: preserve booking history even if vendor profile is deactivated.
+
+generator client {
+  provider     = "prisma-client"
+  output       = "../generated/prisma"
+  moduleFormat = "cjs"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ─────────────────────────────────────────────
+// ENUMS
+// ─────────────────────────────────────────────
+
+enum UserRole {
+  CUSTOMER
+  VENDOR
+  ADMIN
+}
+
+enum VendorCategory {
+  PHOTOGRAPHY
+  VENUE
+  CATERING
+  MUSIC
+  DECORATION
+  MAKEUP
+  MEHENDI
+  CLOTHING
+  INVITATIONS
+  TRANSPORTATION
+  WEDDING_PLANNER
+  OTHER
+}
+
+enum BookingStatus {
+  PENDING
+  ACCEPTED
+  REJECTED
+  COMPLETED
+}
+
+enum ProcessState {
+  NEW
+  READY
+  RUNNING
+  WAITING
+  COMPLETED
+}
+
+enum AllocationStatus {
+  ALLOCATED
+  RELEASED
+}
+
+enum RsvpStatus {
+  PENDING
+  ATTENDING
+  DECLINED
+}
+
+// ─────────────────────────────────────────────
+// USER
+// ─────────────────────────────────────────────
+
+model User {
+  id           String   @id @default(uuid())
+  email        String   @unique
+  passwordHash String
+  role         UserRole
+  firstName    String
+  lastName     String
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  wedding       Wedding?
+  vendorProfile VendorProfile?
+
+  @@index([email])
+  @@map("users")
+}
+
+// ─────────────────────────────────────────────
+// WEDDING
+// ─────────────────────────────────────────────
+
+model Wedding {
+  id          String   @id @default(uuid())
+  customerId  String   @unique // one active wedding per customer
+  date        DateTime
+  location    String
+  totalBudget Decimal  @db.Decimal(12, 2)
+  createdAt   DateTime @default(now())
+
+  customer User @relation(fields: [customerId], references: [id], onDelete: Restrict)
+
+  guests   Guest[]
+  events   Event[]
+  expenses Expense[]
+  tasks       Task[]
+  bookings    Booking[]
+  processes   TaskProcess[]
+  allocations ResourceAllocation[]
+
+  @@index([customerId])
+  @@map("weddings")
+}
+
+// ─────────────────────────────────────────────
+// VENDOR PROFILE
+// ─────────────────────────────────────────────
+
+model VendorProfile {
+  id            String         @id @default(uuid())
+  userId        String         @unique // one profile per vendor user
+  businessName  String
+  category      VendorCategory
+  description   String
+  startingPrice Decimal        @db.Decimal(12, 2)
+  imageUrl      String?
+  location      String
+
+  user        User                 @relation(fields: [userId], references: [id], onDelete: Restrict)
+  bookings    Booking[]
+  allocations ResourceAllocation[]
+
+  @@index([userId])
+  @@index([category])
+  @@index([location])
+  @@map("vendor_profiles")
+}
+
+// ─────────────────────────────────────────────
+// BOOKING
+// ─────────────────────────────────────────────
+
+model Booking {
+  id          String        @id @default(uuid())
+  weddingId   String
+  vendorId    String
+  status      BookingStatus @default(PENDING)
+  message     String?
+  serviceDate DateTime
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @default(now()) @updatedAt
+
+  wedding     Wedding              @relation(fields: [weddingId], references: [id], onDelete: Cascade)
+  vendor      VendorProfile        @relation(fields: [vendorId], references: [id], onDelete: Restrict)
+  allocations ResourceAllocation[]
+
+  // Prevent duplicate active requests for the same wedding+vendor.
+  // Note: A full partial unique index (WHERE status IN ('PENDING','ACCEPTED')) cannot be
+  // expressed in Prisma schema syntax. The application layer enforces this constraint.
+  // The composite index below still optimises the query for duplicate checks.
+  @@unique([weddingId, vendorId])
+  @@index([weddingId])
+  @@index([vendorId])
+  @@index([status])
+  @@map("bookings")
+}
+
+// ─────────────────────────────────────────────
+// RESOURCE ALLOCATION (Phase 10)
+// ─────────────────────────────────────────────
+
+// Application-level simulation of OS resource allocation. The resource itself is
+// an existing VendorProfile — nothing about the vendor is duplicated here.
+// These are NOT operating-system kernel resources.
+model ResourceAllocation {
+  id          String           @id @default(uuid())
+  weddingId   String
+  vendorId    String // the allocated resource
+  bookingId   String
+  status      AllocationStatus @default(ALLOCATED)
+  allocatedAt DateTime         @default(now())
+  releasedAt  DateTime?
+
+  wedding Wedding       @relation(fields: [weddingId], references: [id], onDelete: Cascade)
+  vendor  VendorProfile @relation(fields: [vendorId], references: [id], onDelete: Restrict)
+  booking Booking       @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+
+  // A resource can hold at most one ALLOCATED record at a time. Prisma schema
+  // syntax cannot express a partial unique index, so the migration creates
+  // "resource_allocations_active_vendor_key" ON ("vendorId") WHERE status = 'ALLOCATED'.
+  // Released rows are excluded, which is what makes a resource reusable.
+  @@index([weddingId])
+  @@index([vendorId])
+  @@index([bookingId])
+  @@index([status])
+  @@map("resource_allocations")
+}
+
+// ─────────────────────────────────────────────
+// GUEST
+// ─────────────────────────────────────────────
+
+model Guest {
+  id           String     @id @default(uuid())
+  weddingId    String
+  name         String
+  email        String?
+  rsvpStatus   RsvpStatus @default(PENDING)
+  plusOneCount Int        @default(0)
+
+  wedding Wedding @relation(fields: [weddingId], references: [id], onDelete: Cascade)
+
+  @@index([weddingId])
+  @@map("guests")
+}
+
+// ─────────────────────────────────────────────
+// EVENT
+// ─────────────────────────────────────────────
+
+model Event {
+  id        String   @id @default(uuid())
+  weddingId String
+  name      String
+  startTime DateTime
+  endTime   DateTime
+  location  String
+
+  wedding Wedding @relation(fields: [weddingId], references: [id], onDelete: Cascade)
+
+  @@index([weddingId])
+  @@map("events")
+}
+
+// ─────────────────────────────────────────────
+// EXPENSE
+// ─────────────────────────────────────────────
+
+model Expense {
+  id        String  @id @default(uuid())
+  weddingId String
+  title     String
+  amount    Decimal @db.Decimal(12, 2)
+  category  String
+  isPaid    Boolean @default(false)
+
+  wedding Wedding @relation(fields: [weddingId], references: [id], onDelete: Cascade)
+
+  @@index([weddingId])
+  @@map("expenses")
+}
+
+// ─────────────────────────────────────────────
+// TASK
+// ─────────────────────────────────────────────
+
+model Task {
+  id          String    @id @default(uuid())
+  weddingId   String
+  title       String
+  dueDate     DateTime?
+  isCompleted Boolean   @default(false)
+
+  wedding Wedding      @relation(fields: [weddingId], references: [id], onDelete: Cascade)
+  process TaskProcess?
+
+  @@index([weddingId])
+  @@map("tasks")
+}
+
+// ─────────────────────────────────────────────
+// TASK PROCESS (Phase 9 — process-management simulation)
+// ─────────────────────────────────────────────
+
+// Application-level simulation of an OS process backed by a wedding task.
+// These are NOT operating-system kernel processes.
+model TaskProcess {
+  id          String       @id @default(uuid())
+  taskId      String       @unique // one active process record per task
+  weddingId   String
+  pidNumber   Int // rendered as "P<n>"; unique within a wedding
+  state       ProcessState @default(NEW)
+  createdAt   DateTime     @default(now())
+  startedAt   DateTime?
+  completedAt DateTime?
+  updatedAt   DateTime     @default(now()) @updatedAt
+
+  task    Task    @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  wedding Wedding @relation(fields: [weddingId], references: [id], onDelete: Cascade)
+
+  @@unique([weddingId, pidNumber])
+  @@index([weddingId])
+  @@index([state])
+  @@map("task_processes")
+}

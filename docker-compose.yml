@@ -1,0 +1,24 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: wedding-os-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: wedding_os
+      POSTGRES_USER: wedding_os
+      POSTGRES_PASSWORD: wedding_os_dev
+    ports:
+      # Using host port 5433 to avoid conflicts with other PostgreSQL containers
+      - '5433:5432'
+    volumes:
+      - wedding_os_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U wedding_os -d wedding_os']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  wedding_os_pgdata:
+    name: wedding_os_pgdata
